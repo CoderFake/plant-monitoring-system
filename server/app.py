@@ -6,8 +6,17 @@ from models import SensorData, ThresholdSettings
 import json
 from datetime import datetime, timedelta
 import logging
+import sys
+import argparse
+from gesture_control import start_gesture_thread
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__, 
@@ -53,6 +62,8 @@ thresholds = {
 
 last_db_save_time = datetime.now()
 DB_SAVE_INTERVAL = 60
+
+gesture_thread = None
 
 @mqtt.on_connect()
 def handle_connect(client, userdata, flags, rc):
@@ -266,26 +277,53 @@ def get_historical_data(period='day'):
         data = SensorData.query.filter(SensorData.timestamp >= start_date).order_by(SensorData.timestamp).all()
     return data
 
-with app.app_context():
-    db.create_all()
-    
-    if not ThresholdSettings.query.first():
-        initial_settings = ThresholdSettings(
-            temperature_min=18.0,
-            temperature_max=30.0,
-            soil_moisture_min=30,
-            humidity_min=40.0,
-            light_level_min=30
-        )
-        db.session.add(initial_settings)
-        db.session.commit()
-    else:
-        settings = ThresholdSettings.query.first()
-        thresholds["temperature_min"] = settings.temperature_min
-        thresholds["temperature_max"] = settings.temperature_max
-        thresholds["soil_moisture_min"] = settings.soil_moisture_min
-        thresholds["humidity_min"] = settings.humidity_min
-        thresholds["light_level_min"] = settings.light_level_min
+def start_gesture_recognition(test_mode=False):
+    global gesture_thread
+    try:
+        logger.info("Starting gesture recognition thread")
+        gesture_thread = start_gesture_thread(test_mode)
+        logger.info("Gesture recognition thread started")
+    except Exception as e:
+        logger.error(f"Failed to start gesture recognition: {str(e)}")
+
+def init_database():
+    with app.app_context():
+        db.create_all()
+        
+        if not ThresholdSettings.query.first():
+            initial_settings = ThresholdSettings(
+                temperature_min=18.0,
+                temperature_max=30.0,
+                soil_moisture_min=30,
+                humidity_min=40.0,
+                light_level_min=30
+            )
+            db.session.add(initial_settings)
+            db.session.commit()
+        else:
+            settings = ThresholdSettings.query.first()
+            thresholds["temperature_min"] = settings.temperature_min
+            thresholds["temperature_max"] = settings.temperature_max
+            thresholds["soil_moisture_min"] = settings.soil_moisture_min
+            thresholds["humidity_min"] = settings.humidity_min
+            thresholds["light_level_min"] = settings.light_level_min
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description='Plant Monitoring System')
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--app', action='store_true', help='Run only the web application without gesture control')
+    group.add_argument('--cam', action='store_true', help='Run only the gesture control with camera visualization')
+    return parser.parse_args()
 
 if __name__ == '__main__':
-    socketio.run(app, debug=Config.DEBUG, host='0.0.0.0', port=5001)
+    args = parse_arguments()
+    
+    if args.cam:
+        import gesture_control
+        gesture_control.run_gesture_detection(test_mode=True)
+    else:
+        init_database()
+        if not args.app:
+            start_gesture_recognition()
+    
+        socketio.run(app, debug=Config.DEBUG, host='0.0.0.0', port=5001)
